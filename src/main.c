@@ -109,18 +109,155 @@ static const ShellConfig shell_config = {
   commands
 };
 
+#if 1
+// This demo blinks the LED on the PWM pin (GPIO 18) 5 times per second while
+// changing duty-cycle every 2 seconds. Duty cycle starts at 55%, then increases
+// by 10% every 2 seconds, eventually reaching 95%, then wrapping around to
+// 5% after another 2 seconds, then repeating the whole sequence indefinitely.
+// This is a good way to visually confirm the operation of the PWM driver+pin+etc,
+// and although the intensity of the duty cycle can be hard to see precisely
+// with just a LED, the change between the extremes and the progression can
+// be visually seen. Of course, most things done with PWM will occur at
+// frequencies that are imperceivable to naked human senses, so this example
+// is not useful for much more than blinken-LED confirmation demo kinda stuff.
+static PWMConfig pwm_config = {
+  600000,      // PWM clock frequency; max is 19.2MHz. (Ignored by ChibiOS-RPi's original pwm_lld.c, which used 600kHz by default. Now adjustable.)
+  120000,      // PWM period that driver starts with when pwmStart is called. `clock_freq / period = pwm_freq`.
+  // Note that (PWM period * denominator) should not exceed 2^32, and for PWM_PERCENTAGE_TO_WIDTH, denominator is 10000.
+  // Also note that the current BCM2835 ChibiOS fork hard-codes the PWM driver
+  // to run with a sample rate of 600kHz. So if you set period to 600000 and
+  // are using M-S mode (as below), then you'd get 1-second periods.
+  // Likewise, set this to 120000, and your "range" (or S-value) will be set to
+  // 120000 samples, which is 1/5 of the 600000 samples/second, thus the
+  // period for the waveform will be 0.2s and the frequency will be 5Hz.
+  // Thus, decreasing period sample-count will increase PWM frequency whlie
+  // decreasing duty-cycle resolution.
+  // If higher frequencies or duty-cycle resolutions are required, consider
+  // either figuring out N-M mode (PWM_CTL &= ~PWM0_MODE_MS;) or try changing
+  // the clock divider in `ChibiOS-RPi/os/hal/platforms/BCM2835/pwm_lld.c`.
+  NULL,        // Period callback.
+  {
+   {PWM_OUTPUT_ACTIVE_HIGH, NULL}
+  }
+};
+
 static WORKING_AREA(waThread1, 128);
 static msg_t Thread1(void *p) {
   (void)p;
   chRegSetThreadName("blinker");
+
+  // `duty_cycle` is an integer from 0 - 10000, with 10000 meaning 100%.
+  // The initial value here is only initial... this can get modified by
+  // code later on as the demo progresses.
+  uint32_t  duty_cycle = 5500;
+  
+  pwmStart(&PWMD1, &pwm_config);
+  PWM_CTL |= PWM0_MODE_MS;
+  pwmEnableChannel(&PWMD1, 0, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, duty_cycle));
+  
   while (TRUE) {
     palClearPad(ONBOARD_LED_PORT, ONBOARD_LED_PAD);
-    chThdSleepMilliseconds(100);
+    chThdSleepMilliseconds(200);
     palSetPad(ONBOARD_LED_PORT, ONBOARD_LED_PAD);
-    chThdSleepMilliseconds(900);
+    chThdSleepMilliseconds(1800);
+
+	// Change duty-cycle.
+	pwmDisableChannel(&PWMD1, 0);
+	duty_cycle += 1000;
+	if ( duty_cycle >= 10000 )
+		duty_cycle = 500;
+	pwmEnableChannel(&PWMD1, 0, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, duty_cycle));
   }
+  
+  pwmDisableChannel(&PWMD1, 0);
+  pwmStop(&PWMD1);
   return 0;
 }
+#endif
+
+#if 0
+// This demo does a frequency sweep with PWM on GPIO18.
+// 
+// It uses 50% duty cycle always.
+// It starts with a waveform at 21.5kHz, then sweeps up to 24.5kHz.
+//
+// These are the tolerances on the muRata MZB3004T04 micropump that
+// I am aiming to drive with this PWM, hence that specific band of frequencies.
+// (Note that the raw PWM signal coming from a logic pin wouldn't be able to
+// drive such a pump, but I do intend to send that through a MOSFET to switch
+// a higher voltage (ex: 12V) power source, then pass that power signal
+// through something like an LC filter to smooth the waveform into something
+// more sinusoidal, so that the pump gets the power signal that it wants.)
+// 
+// In playing with this, I also discovered that the clock frequency behind
+// the PWM circuit shouldn't be set to 19.2MHz. For some reason that causes
+// a very low frequency PWM, like a few Hz (but it was still frequency-sweeping,
+// so the code wasn't just confused with the other demo). I set it to 9.6MHz
+// instead, and everything worked fine. Dividing it by 8 also worked, but
+// generally it is useful to use the highest clock possible, since that gives
+// the resulting PWM waveform the highest fidelity.
+//
+static PWMConfig pwm_config = {
+  9600000,     // PWM clock frequency; max is 19.2MHz. (Ignored by ChibiOS-RPi's original pwm_lld.c, which used 600kHz by default. Now adjustable.)
+  893,         // PWM period that driver starts with when pwmStart is called. `clock_freq / period = pwm_freq`.
+  NULL,        // Period callback.
+  {
+   {PWM_OUTPUT_ACTIVE_HIGH, NULL}
+  }
+};
+
+static void set_pwm_config_freq_on_bcm2835(PWMConfig *config, uint32_t target_freq)
+{
+	config->period = config->frequency / target_freq;
+}
+
+static WORKING_AREA(waThread1, 128);
+static msg_t Thread1(void *p) {
+	(void)p;
+	chRegSetThreadName("blinker");
+
+	// `duty_cycle` is an integer from 0 - 10000, with 10000 meaning 100%.
+	uint32_t  duty_cycle = 5000;
+
+	// muRata MZB3004T04 resonant frequency range is 21.5kHz to 24.5kHz.
+	// So we'll start at the bottom of that range and sweep up to the top.
+	uint32_t freq = 21500; // in Hz
+	set_pwm_config_freq_on_bcm2835(&pwm_config, freq);
+
+	pwmStart(&PWMD1, &pwm_config);
+	PWM_CTL |= PWM0_MODE_MS;
+	pwmEnableChannel(&PWMD1, 0, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, duty_cycle));
+
+	while (TRUE) {
+		palClearPad(ONBOARD_LED_PORT, ONBOARD_LED_PAD);
+		chThdSleepMilliseconds(200);
+		palSetPad(ONBOARD_LED_PORT, ONBOARD_LED_PAD);
+		chThdSleepMilliseconds(1800);
+
+		// Change frequency.
+		pwmDisableChannel(&PWMD1, 0);
+		pwmStop(&PWMD1);
+
+		freq += 250;
+		if ( freq > 24500 )
+			freq = 21500;
+
+		set_pwm_config_freq_on_bcm2835(&pwm_config, freq);
+		BaseSequentialStream *output_stream = (BaseSequentialStream *)&SD1;
+		chprintf(output_stream, "pwm_config->period   == %d\r\n", pwm_config.period);
+		chprintf(output_stream, "pwm target frequency == %d\r\n", freq);
+		chprintf(output_stream, "pwm result frequency == %d\r\n", pwm_config.frequency / pwm_config.period);
+
+		pwmStart(&PWMD1, &pwm_config);
+		PWM_CTL |= PWM0_MODE_MS;
+		pwmEnableChannel(&PWMD1, 0, PWM_PERCENTAGE_TO_WIDTH(&PWMD1, duty_cycle));
+	}
+
+	pwmDisableChannel(&PWMD1, 0);
+	pwmStop(&PWMD1);
+	return 0;
+}
+#endif
 
 /*
  * Application entry point.
@@ -132,14 +269,22 @@ int main(void) {
   /*
    * Serial port initialization.
    */
-  sdStart(&SD1, NULL); 
-  chprintf((BaseSequentialStream *)&SD1, "Main (SD1 started)\r\n");
+  sdStart(&SD1, NULL);
+  BaseSequentialStream *output_stream = (BaseSequentialStream *)&SD1;
+  chprintf(output_stream, "Main (SD1 started)\r\n");
 
   /*
    * Shell initialization.
    */
   shellInit();
   shellCreate(&shell_config, SHELL_WA_SIZE, NORMALPRIO + 1);
+
+  /*
+   * PWM initialization.
+   */
+  //palSetPadMode(GPIO12_PORT, GPIO12_PAD, PAL_MODE_ALTERNATE(0));
+  pwmInit();
+  pwmObjectInit(&PWMD1);
 
   /*
    * Set mode of onboard LED
